@@ -2,12 +2,17 @@ package collectors
 
 import (
 	"context"
+	client "purestorage/fb-openmetrics-exporter/internal/rest-client"
+
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
-	"purestorage/fb-openmetrics-exporter/internal/rest-client"
+	"gopkg.in/DataDog/dd-trace-go.v1/ddtrace/tracer"
 )
 
 func Collector(ctx context.Context, metrics string, registry *prometheus.Registry, fbclient *client.FBClient) bool {
+	span, ctx := tracer.StartSpanFromContext(ctx, "collector", tracer.ResourceName("metrics.collector"))
+	defer span.Finish()
+
 	filesystems := fbclient.GetFileSystems()
 	buckets := fbclient.GetBuckets()
 	registry.MustRegister(
@@ -53,7 +58,7 @@ func Collector(ctx context.Context, metrics string, registry *prometheus.Registr
 		registry.MustRegister(clientsPerfCollector)
 	}
 	if metrics == "all" || metrics == "usage" {
-		usageCollector := NewUsageCollector(fbclient, filesystems)
+		usageCollector := NewUsageCollector(ctx, fbclient, filesystems)
 		registry.MustRegister(usageCollector)
 	}
 	if metrics == "all" || metrics == "policies" {

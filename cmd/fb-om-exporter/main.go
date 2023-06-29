@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"io"
 	"log"
@@ -12,10 +11,12 @@ import (
 	client "purestorage/fb-openmetrics-exporter/internal/rest-client"
 	"strings"
 
-        "github.com/akamensky/argparse"
+	"github.com/akamensky/argparse"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-        "gopkg.in/yaml.v3"
+	httptrace "gopkg.in/DataDog/dd-trace-go.v1/contrib/net/http"
+	"gopkg.in/DataDog/dd-trace-go.v1/ddtrace/tracer"
+	"gopkg.in/yaml.v3"
 )
 
 var version string = "development"
@@ -23,67 +24,77 @@ var debug bool = false
 var arraytokens config.FlashBladeList
 
 func FileExists(args []string) error {
-        _, err := os.Stat(args[0])
-        return err
+	_, err := os.Stat(args[0])
+	return err
 }
 
 func main() {
 
-        parser := argparse.NewParser("pure-fb-om-exporter", "Pure Storage FB OpenMetrics exporter")
-        host := parser.String("a", "address", &argparse.Options{Required: false, Help: "IP address for this exporter to bind to", Default: "0.0.0.0"})
-        port := parser.Int("p", "port", &argparse.Options{Required: false, Help: "Port for this exporter to listen", Default: 9491})
-        d := parser.Flag("d", "debug", &argparse.Options{Required: false, Help: "Enable debug", Default: false})
-        at := parser.File("t", "tokens", os.O_RDONLY, 0600, &argparse.Options{Required: false, Validate: FileExists, Help: "API token(s) map file"})
-        err := parser.Parse(os.Args)
-        if err != nil {
-                log.Fatalf("Error in token file: %v", err)
-        }
-        if !isNilFile(*at) {
-                defer at.Close()
-                buf := make([]byte, 1024)
-                arrlist := ""
-                for {
-                        n, err := at.Read(buf)
-                        if err == io.EOF {
-                                break
-                        }
-                        if err != nil {
-                                log.Fatalf("Reading token file: %v", err)
-                       }
-                        if n > 0 {
-                                arrlist = arrlist + string(buf[:n])
-                        }
-                }
-                buf = []byte(arrlist)
-                err := yaml.Unmarshal(buf, &arraytokens)
-                if err != nil {
-                        log.Fatalf("Unmarshalling token file: %v", err)
-                }
-        }
-        debug = *d
-        addr := fmt.Sprintf("%s:%d", *host, *port)
-        log.Printf("Start Pure FlashBlade exporter %s on %s", version, addr)
+	tracer.Start(
+		tracer.WithService("fb-ome-dev"),
+		tracer.WithEnv("gse-lab-dev"),
+	)
+	defer tracer.Stop()
 
-	http.HandleFunc("/", index)
-	http.HandleFunc("/metrics/array", func(w http.ResponseWriter, r *http.Request) {
+	parser := argparse.NewParser("pure-fb-om-exporter", "Pure Storage FB OpenMetrics exporter")
+	host := parser.String("a", "address", &argparse.Options{Required: false, Help: "IP address for this exporter to bind to", Default: "0.0.0.0"})
+	port := parser.Int("p", "port", &argparse.Options{Required: false, Help: "Port for this exporter to listen", Default: 9491})
+	d := parser.Flag("d", "debug", &argparse.Options{Required: false, Help: "Enable debug", Default: false})
+	at := parser.File("t", "tokens", os.O_RDONLY, 0600, &argparse.Options{Required: false, Validate: FileExists, Help: "API token(s) map file"})
+	err := parser.Parse(os.Args)
+	if err != nil {
+		log.Fatalf("Error in token file: %v", err)
+	}
+	if !isNilFile(*at) {
+		defer at.Close()
+		buf := make([]byte, 1024)
+		arrlist := ""
+		for {
+			n, err := at.Read(buf)
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				log.Fatalf("Reading token file: %v", err)
+			}
+			if n > 0 {
+				arrlist = arrlist + string(buf[:n])
+			}
+		}
+		buf = []byte(arrlist)
+		err := yaml.Unmarshal(buf, &arraytokens)
+		if err != nil {
+			log.Fatalf("Unmarshalling token file: %v", err)
+		}
+	}
+	debug = *d
+	addr := fmt.Sprintf("%s:%d", *host, *port)
+	log.Printf("Start Pure FlashBlade exporter %s on %s", version, addr)
+
+	mux := httptrace.NewServeMux()
+	mux.HandleFunc("/", index)
+	mux.HandleFunc("/metrics/array", func(w http.ResponseWriter, r *http.Request) {
 		metricsHandler(w, r)
 	})
-	http.HandleFunc("/metrics/clients", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/metrics/clients", func(w http.ResponseWriter, r *http.Request) {
 		metricsHandler(w, r)
 	})
-	http.HandleFunc("/metrics/usage", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/metrics/usage", func(w http.ResponseWriter, r *http.Request) {
 		metricsHandler(w, r)
 	})
-	http.HandleFunc("/metrics/policies", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/metrics/policies", func(w http.ResponseWriter, r *http.Request) {
 		metricsHandler(w, r)
 	})
-	http.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 		metricsHandler(w, r)
 	})
-	log.Fatal(http.ListenAndServe(addr, nil))
+	log.Fatal(http.ListenAndServe(addr, mux))
 }
 
 func metricsHandler(w http.ResponseWriter, r *http.Request) {
+	span, ctx := tracer.StartSpanFromContext(r.Context(), "metrics.handler")
+	defer span.Finish()
+
 	params := r.URL.Query()
 	path := strings.Split(r.URL.Path, "/")
 	metrics := ""
@@ -112,8 +123,8 @@ func metricsHandler(w http.ResponseWriter, r *http.Request) {
 	authHeader := r.Header.Get("Authorization")
 	authFields := strings.Fields(authHeader)
 	address, apitoken := arraytokens.GetArrayParams(endpoint)
-        if len(authFields) == 2 && strings.ToLower(authFields[0]) == "bearer" {
-                apitoken = authFields[1]
+	if len(authFields) == 2 && strings.ToLower(authFields[0]) == "bearer" {
+		apitoken = authFields[1]
 		address = endpoint
 	}
 	if apitoken == "" {
@@ -127,7 +138,7 @@ func metricsHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Error connecting to FlashBlade. Check your management endpoint and/or api token are correct.", http.StatusBadRequest)
 		return
 	}
-	collectors.Collector(context.TODO(), metrics, registry, fbclient)
+	collectors.Collector(ctx, metrics, registry, fbclient)
 
 	h := promhttp.HandlerFor(registry, promhttp.HandlerOpts{})
 	h.ServeHTTP(w, r)
@@ -187,6 +198,6 @@ func index(w http.ResponseWriter, r *http.Request) {
 }
 
 func isNilFile(f os.File) bool {
-        var tf os.File
-        return f == tf
+	var tf os.File
+	return f == tf
 }

@@ -1,9 +1,11 @@
 package collectors
 
 import (
-	"github.com/prometheus/client_golang/prometheus"
-	"purestorage/fb-openmetrics-exporter/internal/rest-client"
+	"context"
+	client "purestorage/fb-openmetrics-exporter/internal/rest-client"
 	"strconv"
+
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 type UsageCollector struct {
@@ -58,7 +60,7 @@ func (c *UsageCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 }
 
-func NewUsageCollector(fb *client.FBClient,
+func NewUsageCollector(ctx context.Context, fb *client.FBClient,
 	f *client.FileSystemsList) *UsageCollector {
 	return &UsageCollector{
 		UsageUsersDesc: prometheus.NewDesc(
